@@ -4,6 +4,7 @@ pub use crate::ir::analysis::DeriveTrait;
 pub use crate::ir::derive::CanDerive as ImplementsTrait;
 pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
 pub use crate::ir::int::IntKind;
+use crate::CodeGenAttributes;
 use std::fmt;
 
 /// An enum to allow ignoring parsing of macros.
@@ -140,6 +141,14 @@ pub trait ParseCallbacks: fmt::Debug {
     /// Process a source code comment.
     fn process_comment(&self, _comment: &str) -> Option<String> {
         None
+    }
+
+    /// Add attributes based on documentation comments
+    fn parse_comments_for_attributes(
+        &self,
+        _comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        vec![]
     }
 
     /// Potentially override the visibility of a composite type field.

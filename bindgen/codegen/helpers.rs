@@ -9,6 +9,42 @@ pub(crate) mod attributes {
     use proc_macro2::{Ident, Span, TokenStream};
     use std::{borrow::Cow, str::FromStr};
 
+    /// Attributes which may be added ontop of items
+    #[derive(Clone, Debug)]
+    pub enum Attribute {
+        /// `#[derive($inner)]`
+        Derives(Vec<String>),
+        /// `#[inline]`
+        Inline,
+        /// `#[must_use]`
+        MustUse,
+        /// `#[doc($inner)]`
+        Doc(String),
+        /// `#[cfg($inner)`
+        Cfg(String),
+        /// `#[cfg_attr($inner)`
+        CfgAttr(String),
+        /// `#[deprecated]` or `#[deprecated($inner)]`
+        Deprecated(Option<String>),
+    }
+
+    impl Attribute {
+        pub(crate) fn to_tokenstream(&self) -> TokenStream {
+            match self {
+                Attribute::Derives(d) => {
+                    let tmp: Vec<&str> = d.iter().map(String::as_str).collect();
+                    derives(&tmp)
+                }
+                Attribute::Inline => inline(),
+                Attribute::MustUse => must_use(),
+                Attribute::Doc(comment) => doc(&comment),
+                Attribute::Cfg(condition) => cfg(&condition),
+                Attribute::CfgAttr(inner) => cfg_attr(&inner),
+                Attribute::Deprecated(inner) => deprecated(inner.clone()),
+            }
+        }
+    }
+
     pub(crate) fn repr(which: &str) -> TokenStream {
         let which = Ident::new(which, Span::call_site());
         quote! {
@@ -57,6 +93,28 @@ pub(crate) mod attributes {
             quote!()
         } else {
             quote!(#[doc = #comment])
+        }
+    }
+
+    pub(crate) fn cfg(cfg: &str) -> TokenStream {
+        let raw_cfg = TokenStream::from_str(cfg).expect("cfg to be valid");
+        quote!(#[cfg(#raw_cfg)])
+    }
+
+    pub(crate) fn cfg_attr(cfg: &str) -> TokenStream {
+        let raw_cfg = TokenStream::from_str(cfg).expect("cfg to be valid");
+        quote!(#[cfg_attr(#raw_cfg)])
+    }
+
+    pub(crate) fn deprecated(inner: Option<String>) -> TokenStream {
+        if let Some(inner) = inner {
+            let raw =
+                TokenStream::from_str(inner.as_str()).expect("cfg to be valid");
+            quote! {
+                #[deprecated(#raw)]
+            }
+        } else {
+            quote!(#[deprecated])
         }
     }
 

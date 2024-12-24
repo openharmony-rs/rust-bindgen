@@ -67,6 +67,8 @@ use std::fmt::{self, Write};
 use std::ops;
 use std::str::{self, FromStr};
 
+pub use helpers::attributes::Attribute as CodeGenAttributes;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CodegenError {
     Serialize { msg: String, loc: String },
@@ -683,7 +685,12 @@ impl CodeGenerator for Var {
 
         let mut attrs = vec![];
         if let Some(comment) = item.comment(ctx) {
-            attrs.push(attributes::doc(&comment));
+            let processed_comment = ctx.options().process_comment(&comment);
+            attrs.push(attributes::doc(&processed_comment));
+            for attrib in ctx.options().parse_comments_for_attributes(&comment)
+            {
+                attrs.push(attrib.to_tokenstream());
+            }
         }
 
         let var_ty = self.ty();
@@ -894,7 +901,15 @@ impl CodeGenerator for Type {
                 let rust_name = ctx.rust_ident(name);
 
                 let mut tokens = if let Some(comment) = item.comment(ctx) {
-                    attributes::doc(&comment)
+                    let processed_comment =
+                        ctx.options().process_comment(&comment);
+                    let mut attrs = attributes::doc(&processed_comment);
+                    for attrib in
+                        ctx.options().parse_comments_for_attributes(&comment)
+                    {
+                        attrs.append_all(attrib.to_tokenstream());
+                    }
+                    attrs
                 } else {
                     quote! {}
                 };
@@ -1014,7 +1029,15 @@ impl CodeGenerator for Type {
                 });
 
                 let mut tokens = if let Some(comment) = item.comment(ctx) {
-                    attributes::doc(&comment)
+                    let processed_comment =
+                        ctx.options().process_comment(&comment);
+                    let mut attrs = attributes::doc(&processed_comment);
+                    for attrib in
+                        ctx.options().parse_comments_for_attributes(&comment)
+                    {
+                        attrs.append_all(attrib.to_tokenstream());
+                    }
+                    attrs
                 } else {
                     quote! {}
                 };
@@ -1547,6 +1570,13 @@ impl FieldCodegen<'_> for FieldData {
                 field = attributes::doc(&comment);
             }
         }
+        // let mut field_attributes = vec![];
+        // Todo: check interaction with padding field below!
+        // if let Some(raw_comment) = self.comment() {
+        //     for attrib in  ctx.options().parse_comments_for_attributes(raw_comment) {
+        //         field.append_all(attrib.to_tokenstream());
+        //     }
+        // }
 
         let field_name = self
             .name()
@@ -2421,8 +2451,22 @@ impl CodeGenerator for CompInfo {
         let mut needs_debug_impl = false;
         let mut needs_partialeq_impl = false;
         let needs_flexarray_impl = flex_array_generic.is_some();
+        let mut cfg_attrs = vec![];
         if let Some(comment) = item.comment(ctx) {
-            attributes.push(attributes::doc(&comment));
+            let processed_comment = ctx.options().process_comment(&comment);
+            attributes.push(attributes::doc(&processed_comment));
+            for attrib in ctx
+                .options()
+                .parse_comments_for_attributes(comment.as_ref())
+            {
+                if matches!(
+                    attrib,
+                    CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
+                ) {
+                    cfg_attrs.push(attrib.to_tokenstream());
+                }
+                attributes.push(attrib.to_tokenstream());
+            }
         }
 
         // if a type has both a "packed" attribute and an "align(N)" attribute, then check if the
@@ -2770,6 +2814,7 @@ impl CodeGenerator for CompInfo {
 
         if needs_clone_impl {
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels Clone for #ty_for_impl {
                     fn clone(&self) -> Self { *self }
                 }
@@ -2810,6 +2855,7 @@ impl CodeGenerator for CompInfo {
             // non-zero padding bytes, especially when forwards/backwards compatibility is
             // involved.
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels Default for #ty_for_impl {
                     fn default() -> Self {
                         #body
@@ -2829,6 +2875,7 @@ impl CodeGenerator for CompInfo {
             let prefix = ctx.trait_prefix();
 
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels ::#prefix::fmt::Debug for #ty_for_impl {
                     #impl_
                 }
@@ -2853,6 +2900,7 @@ impl CodeGenerator for CompInfo {
 
                 let prefix = ctx.trait_prefix();
                 result.push(quote! {
+                    #( #cfg_attrs )*
                     impl #impl_generics_labels ::#prefix::cmp::PartialEq for #ty_for_impl #partialeq_bounds {
                         #impl_
                     }
@@ -2862,6 +2910,7 @@ impl CodeGenerator for CompInfo {
 
         if !methods.is_empty() {
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels #ty_for_impl {
                     #( #methods )*
                 }
@@ -3293,14 +3342,17 @@ enum EnumBuilder<'a> {
         canonical_name: &'a str,
         tokens: proc_macro2::TokenStream,
         is_bitfield: bool,
+        variant_attrs: Vec<proc_macro2::TokenStream>,
         is_global: bool,
     },
     Consts {
         variants: Vec<proc_macro2::TokenStream>,
+        variant_attrs: Vec<proc_macro2::TokenStream>,
     },
     ModuleConsts {
         module_name: &'a str,
         module_items: Vec<proc_macro2::TokenStream>,
+        variant_attrs: Vec<proc_macro2::TokenStream>,
     },
 }
 
@@ -3317,6 +3369,7 @@ impl<'a> EnumBuilder<'a> {
         mut attrs: Vec<proc_macro2::TokenStream>,
         repr: &syn::Type,
         enum_variation: EnumVariation,
+        variant_attrs: Vec<proc_macro2::TokenStream>,
         has_typedef: bool,
     ) -> Self {
         let ident = Ident::new(name, Span::call_site());
@@ -3332,6 +3385,7 @@ impl<'a> EnumBuilder<'a> {
                     pub struct #ident (pub #repr);
                 },
                 is_bitfield,
+                variant_attrs,
                 is_global,
             },
 
@@ -3357,7 +3411,10 @@ impl<'a> EnumBuilder<'a> {
                     });
                 }
 
-                EnumBuilder::Consts { variants }
+                EnumBuilder::Consts {
+                    variants,
+                    variant_attrs,
+                }
             }
 
             EnumVariation::ModuleConsts => {
@@ -3373,6 +3430,7 @@ impl<'a> EnumBuilder<'a> {
                 EnumBuilder::ModuleConsts {
                     module_name: name,
                     module_items: vec![type_definition],
+                    variant_attrs,
                 }
             }
         }
@@ -3402,8 +3460,16 @@ impl<'a> EnumBuilder<'a> {
         let mut doc = quote! {};
         if ctx.options().generate_comments {
             if let Some(raw_comment) = variant.comment() {
-                let comment = ctx.options().process_comment(raw_comment);
-                doc = attributes::doc(&comment);
+                let processed_comment =
+                    ctx.options().process_comment(raw_comment);
+                doc = attributes::doc(&processed_comment);
+                // hacky to push it into #doc, but whatever
+                for attrib in ctx
+                    .options()
+                    .parse_comments_for_attributes(raw_comment.as_ref())
+                {
+                    doc.append_all(attrib.to_tokenstream());
+                }
             }
         }
 
@@ -3418,6 +3484,7 @@ impl<'a> EnumBuilder<'a> {
                 EnumBuilder::Rust {
                     attrs,
                     ident,
+                    // TODO: cfg attrs
                     tokens: quote! {
                         #tokens
                         #doc
@@ -3430,6 +3497,7 @@ impl<'a> EnumBuilder<'a> {
             EnumBuilder::NewType {
                 canonical_name,
                 is_global,
+                ref variant_attrs,
                 ..
             } => {
                 if is_ty_named && !is_global {
@@ -3437,6 +3505,7 @@ impl<'a> EnumBuilder<'a> {
                     let variant_ident = ctx.rust_ident(variant_name);
 
                     result.push(quote! {
+                        #( #variant_attrs )*
                         impl #enum_ident {
                             #doc
                             pub const #variant_ident : #rust_ty = #rust_ty ( #expr );
@@ -3451,6 +3520,7 @@ impl<'a> EnumBuilder<'a> {
                     });
                     result.push(quote! {
                         #doc
+                        #( #variant_attrs )*
                         pub const #ident : #rust_ty = #rust_ty ( #expr );
                     });
                 }
@@ -3458,7 +3528,9 @@ impl<'a> EnumBuilder<'a> {
                 self
             }
 
-            EnumBuilder::Consts { .. } => {
+            EnumBuilder::Consts {
+                ref variant_attrs, ..
+            } => {
                 let constant_name = match mangling_prefix {
                     Some(prefix) => {
                         Cow::Owned(format!("{prefix}_{variant_name}"))
@@ -3467,8 +3539,10 @@ impl<'a> EnumBuilder<'a> {
                 };
 
                 let ident = ctx.rust_ident(constant_name);
+
                 result.push(quote! {
                     #doc
+                    #( #variant_attrs )*
                     pub const #ident : #rust_ty = #expr ;
                 });
 
@@ -3477,9 +3551,11 @@ impl<'a> EnumBuilder<'a> {
             EnumBuilder::ModuleConsts {
                 module_name,
                 mut module_items,
+                variant_attrs,
             } => {
                 let name = ctx.rust_ident(variant_name);
                 let ty = ctx.rust_ident(CONSTIFIED_ENUM_MODULE_REPR_NAME);
+                // TODO: cfg attrs
                 module_items.push(quote! {
                     #doc
                     pub const #name : #ty = #expr ;
@@ -3488,6 +3564,7 @@ impl<'a> EnumBuilder<'a> {
                 EnumBuilder::ModuleConsts {
                     module_name,
                     module_items,
+                    variant_attrs,
                 }
             }
         }
@@ -3524,6 +3601,7 @@ impl<'a> EnumBuilder<'a> {
                 canonical_name,
                 tokens,
                 is_bitfield,
+                variant_attrs,
                 ..
             } => {
                 if !is_bitfield {
@@ -3534,6 +3612,7 @@ impl<'a> EnumBuilder<'a> {
                 let prefix = ctx.trait_prefix();
 
                 result.push(quote! {
+                    #( #variant_attrs )*
                     impl ::#prefix::ops::BitOr<#rust_ty> for #rust_ty {
                         type Output = Self;
 
@@ -3545,6 +3624,7 @@ impl<'a> EnumBuilder<'a> {
                 });
 
                 result.push(quote! {
+                    #( #variant_attrs )*
                     impl ::#prefix::ops::BitOrAssign for #rust_ty {
                         #[inline]
                         fn bitor_assign(&mut self, rhs: #rust_ty) {
@@ -3554,6 +3634,7 @@ impl<'a> EnumBuilder<'a> {
                 });
 
                 result.push(quote! {
+                    #( #variant_attrs )*
                     impl ::#prefix::ops::BitAnd<#rust_ty> for #rust_ty {
                         type Output = Self;
 
@@ -3565,6 +3646,7 @@ impl<'a> EnumBuilder<'a> {
                 });
 
                 result.push(quote! {
+                    #( #variant_attrs )*
                     impl ::#prefix::ops::BitAndAssign for #rust_ty {
                         #[inline]
                         fn bitand_assign(&mut self, rhs: #rust_ty) {
@@ -3579,10 +3661,12 @@ impl<'a> EnumBuilder<'a> {
             EnumBuilder::ModuleConsts {
                 module_items,
                 module_name,
+                variant_attrs,
                 ..
             } => {
                 let ident = ctx.rust_ident(module_name);
                 quote! {
+                    #( #variant_attrs )*
                     pub mod #ident {
                         #( #module_items )*
                     }
@@ -3693,9 +3777,23 @@ impl CodeGenerator for Enum {
             }
             _ => {}
         };
-
+        let mut enum_variation_attrs = vec![];
         if let Some(comment) = item.comment(ctx) {
-            attrs.push(attributes::doc(&comment));
+            let processed_comment =
+                ctx.options().process_comment(comment.as_ref());
+            attrs.push(attributes::doc(&processed_comment));
+            for attrib in ctx
+                .options()
+                .parse_comments_for_attributes(comment.as_ref())
+            {
+                if matches!(
+                    attrib,
+                    CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
+                ) {
+                    enum_variation_attrs.push(attrib.to_tokenstream());
+                }
+                attrs.push(attrib.to_tokenstream());
+            }
         }
 
         if item.must_use(ctx) {
@@ -3784,9 +3882,15 @@ impl CodeGenerator for Enum {
 
         let repr = repr.to_rust_ty_or_opaque(ctx, item);
         let has_typedef = ctx.is_enum_typedef_combo(item.id());
-
-        let mut builder =
-            EnumBuilder::new(&name, attrs, &repr, variation, has_typedef);
+        // FIXME: cfg attrs should guard constant
+        let mut builder = EnumBuilder::new(
+            &name,
+            attrs,
+            &repr,
+            variation,
+            enum_variation_attrs,
+            has_typedef,
+        );
 
         // A map where we keep a value -> variant relation.
         let mut seen_values = HashMap::<_, Ident>::default();
@@ -4625,7 +4729,15 @@ impl CodeGenerator for Function {
         }
 
         if let Some(comment) = item.comment(ctx) {
-            attributes.push(attributes::doc(&comment));
+            let processed_comment =
+                ctx.options().process_comment(comment.as_ref());
+            attributes.push(attributes::doc(&processed_comment));
+            for attrib in ctx
+                .options()
+                .parse_comments_for_attributes(comment.as_ref())
+            {
+                attributes.push(attrib.to_tokenstream());
+            }
         }
 
         let abi = match signature.abi(ctx, Some(name)) {
