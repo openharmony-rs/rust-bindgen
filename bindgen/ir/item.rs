@@ -317,7 +317,8 @@ impl CanDeriveDefault for Item {
 
 impl CanDeriveCopy for Item {
     fn can_derive_copy(&self, ctx: &BindgenContext) -> bool {
-        self.id().can_derive_copy(ctx)
+        assert!(ctx.in_codegen_phase());
+        !self.id.is_opaque(ctx, &()) && self.id().can_derive_copy(ctx)
     }
 }
 

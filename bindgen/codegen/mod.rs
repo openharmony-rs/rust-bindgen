@@ -149,8 +149,14 @@ fn derives_of_item(
     item: &Item,
     ctx: &BindgenContext,
     packed: bool,
+    opaque: bool,
 ) -> DerivableTraits {
     let mut derivable_traits = DerivableTraits::empty();
+    // If a type is opaque, we don't know the memory layout and thus can't
+    // sensibly derive Copy, Clone, Debug, Default or anything else.
+    if opaque {
+        return derivable_traits;
+    }
 
     if item.can_derive_copy(ctx) && !item.annotations().disallow_copy() {
         derivable_traits |= DerivableTraits::COPY;
@@ -1051,8 +1057,12 @@ impl CodeGenerator for Type {
                         let mut attributes =
                             vec![attributes::repr("transparent")];
                         let packed = false; // Types can't be packed in Rust.
-                        let derivable_traits =
-                            derives_of_item(item, ctx, packed);
+                        let derivable_traits = derives_of_item(
+                            item,
+                            ctx,
+                            packed,
+                            self.is_opaque(ctx, item),
+                        );
                         let mut derives: Vec<_> = derivable_traits.into();
                         // The custom derives callback may return a list of derive attributes;
                         // add them to the end of the list.
@@ -2148,7 +2158,8 @@ impl CodeGenerator for CompInfo {
         //
         // Also, we need to generate the vtable in such a way it "inherits" from
         // the parent too.
-        let is_opaque = item.is_opaque(ctx, &());
+        let is_opaque =
+            item.is_opaque(ctx, &()) || self.is_forward_declaration();
         let mut fields = vec![];
         let visibility = item
             .annotations()
@@ -2444,7 +2455,13 @@ impl CodeGenerator for CompInfo {
             }
         }
 
-        let derivable_traits = derives_of_item(item, ctx, packed);
+        let derivable_traits = derives_of_item(
+            item,
+            ctx,
+            packed,
+            is_opaque || self.is_forward_declaration(),
+        );
+
         if !derivable_traits.contains(DerivableTraits::DEBUG) {
             needs_debug_impl = ctx.options().derive_debug &&
                 ctx.options().impl_debug &&
@@ -3687,7 +3704,7 @@ impl CodeGenerator for Enum {
 
         if !variation.is_const() {
             let packed = false; // Enums can't be packed in Rust.
-            let mut derives = derives_of_item(item, ctx, packed);
+            let mut derives = derives_of_item(item, ctx, packed, false);
             // For backwards compat, enums always derive
             // Clone/Eq/PartialEq/Hash, even if we don't generate those by
             // default.
