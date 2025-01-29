@@ -193,12 +193,33 @@ impl Enum {
             EnumVariation::NewType {
                 is_bitfield: true,
                 is_global: false,
+                is_result_type: false,
+            }
+        } else if self.is_matching_enum(
+            ctx,
+            &ctx.options().result_error_enums,
+            item,
+        ) {
+            let zero_variant = self.variants.iter().find(|x| {
+                matches!(
+                    x.val,
+                    EnumVariantValue::Signed(0) | EnumVariantValue::Unsigned(0)
+                )
+            });
+            if zero_variant.is_none() {
+                panic!("Result-error-enum must have a zero variant. (Item: {item:?})");
+            }
+            EnumVariation::NewType {
+                is_bitfield: false,
+                is_global: false,
+                is_result_type: true,
             }
         } else if self.is_matching_enum(ctx, &ctx.options().newtype_enums, item)
         {
             EnumVariation::NewType {
                 is_bitfield: false,
                 is_global: false,
+                is_result_type: false,
             }
         } else if self.is_matching_enum(
             ctx,
@@ -208,6 +229,7 @@ impl Enum {
             EnumVariation::NewType {
                 is_bitfield: false,
                 is_global: true,
+                is_result_type: false,
             }
         } else if self.is_matching_enum(
             ctx,
