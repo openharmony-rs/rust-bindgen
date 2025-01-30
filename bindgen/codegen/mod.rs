@@ -3384,6 +3384,7 @@ impl<'a> EnumBuilder<'a> {
     /// the representation, and which variation it should be generated as.
     fn new(
         name: &'a str,
+        ctx: &BindgenContext,
         mut attrs: Vec<proc_macro2::TokenStream>,
         repr: &syn::Type,
         enum_variation: EnumVariation,
@@ -3398,7 +3399,12 @@ impl<'a> EnumBuilder<'a> {
                 is_global,
                 is_result_type: true,
             } => {
-                let error_ident = format_ident!("{}Error", ident);
+                let error_enum_name = ctx
+                    .options()
+                    .last_callback(|c| c.result_error_enum_name(&name))
+                    .unwrap_or(format!("{name}Error"));
+                let error_ident =
+                    Ident::new(&error_enum_name, Span::call_site());
                 EnumBuilder::NewType {
                     canonical_name: name,
                     tokens: quote! {
@@ -3966,6 +3972,7 @@ impl CodeGenerator for Enum {
         // FIXME: cfg attrs should guard constant
         let mut builder = EnumBuilder::new(
             &name,
+            ctx,
             attrs,
             &repr,
             variation,
