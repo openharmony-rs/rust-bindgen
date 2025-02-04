@@ -59,6 +59,8 @@ use proc_macro2::{Ident, Span};
 use quote::{ToTokens, TokenStreamExt};
 
 use crate::{Entry, HashMap, HashSet};
+pub use helpers::attributes::Attribute as CodeGenAttributes;
+use itertools::izip;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -66,8 +68,6 @@ use std::ffi::CStr;
 use std::fmt::{self, Write};
 use std::ops;
 use std::str::{self, FromStr};
-
-pub use helpers::attributes::Attribute as CodeGenAttributes;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CodegenError {
@@ -3347,138 +3347,122 @@ impl FromStr for EnumVariation {
     }
 }
 
+struct EnumBuilder {
+    /// Identifier of the type used in the FFI bindings
+    ffi_type_ident: Ident,
+    /// Type identifier of the enum.
+    ///
+    /// This is the base name, i.e. for ModuleConst enums, this does not include the module name.
+    enum_type: Ident,
+    /// If the FFI-binding is a type-alias to `Result<(), ErrorType>>`,
+    /// then `result_error_enum_ident` is the identifier used for `ErrorType`.
+    /// Todo: For Newtypes, this is the newtype ident. For consts this is NonZero<repr>.
+    result_error_enum_ident: Option<Ident>,
+    attrs: Vec<proc_macro2::TokenStream>,
+    /// The representation of the enum, e.g. `u32` or `NonZero<u32>`.
+    enum_repr: proc_macro2::TokenStream,
+    variant_attrs: Vec<proc_macro2::TokenStream>,
+    kind: EnumBuilderVariant,
+}
+
 /// A helper type to construct different enum variations.
-enum EnumBuilder<'a> {
+enum EnumBuilderVariant {
     Rust {
-        attrs: Vec<proc_macro2::TokenStream>,
-        ident: Ident,
-        tokens: proc_macro2::TokenStream,
-        emitted_any_variants: bool,
+        non_exhaustive: bool,
     },
     NewType {
-        canonical_name: &'a str,
-        tokens: proc_macro2::TokenStream,
         is_bitfield: bool,
-        variant_attrs: Vec<proc_macro2::TokenStream>,
         is_global: bool,
-        result_error_enum_ident: Option<Ident>,
+        // if the enum is named or not.
+        is_anonymous: bool,
     },
     Consts {
-        variants: Vec<proc_macro2::TokenStream>,
-        variant_attrs: Vec<proc_macro2::TokenStream>,
+        needs_typedef: bool,
     },
     ModuleConsts {
-        module_name: &'a str,
-        module_items: Vec<proc_macro2::TokenStream>,
-        variant_attrs: Vec<proc_macro2::TokenStream>,
+        module_name: Ident,
     },
 }
 
-impl<'a> EnumBuilder<'a> {
+impl EnumBuilder {
     /// Returns true if the builder is for a rustified enum.
     fn is_rust_enum(&self) -> bool {
-        matches!(*self, EnumBuilder::Rust { .. })
+        matches!(self.kind, EnumBuilderVariant::Rust { .. })
     }
 
     /// Create a new enum given an item builder, a canonical name, a name for
     /// the representation, and which variation it should be generated as.
     fn new(
-        name: &'a str,
+        name: &str,
         ctx: &BindgenContext,
-        mut attrs: Vec<proc_macro2::TokenStream>,
+        attrs: Vec<proc_macro2::TokenStream>,
         repr: &syn::Type,
         enum_variation: EnumVariation,
         variant_attrs: Vec<proc_macro2::TokenStream>,
         has_typedef: bool,
+        enum_is_anonymous: bool,
     ) -> Self {
         let ident = Ident::new(name, Span::call_site());
+        // For most variants this is the same
+        let mut enum_ty = ident.clone();
 
-        match enum_variation {
+        // todo: or NonZero, once we refactor result_type
+        let mut enum_repr = quote! { #repr };
+
+        let mut result_error_enum_ident = None;
+
+        let kind = match enum_variation {
             EnumVariation::NewType {
                 is_bitfield,
                 is_global,
-                is_result_type: true,
+                is_result_type,
             } => {
-                let error_enum_name = ctx
-                    .options()
-                    .last_callback(|c| c.result_error_enum_name(&name))
-                    .unwrap_or(format!("{name}Error"));
-                let error_ident =
-                    Ident::new(&error_enum_name, Span::call_site());
-                EnumBuilder::NewType {
-                    canonical_name: name,
-                    tokens: quote! {
-                        pub type #ident = Result<(), #error_ident>;
+                if is_result_type {
+                    let error_enum_name = ctx
+                        .options()
+                        .last_callback(|c| c.result_error_enum_name(&name))
+                        .unwrap_or(format!("{name}Error"));
+                    let error_enum_ident =
+                        Ident::new(&error_enum_name, Span::call_site());
+                    enum_repr = quote! { core::num::NonZero<#repr> };
+                    enum_ty = error_enum_ident.clone();
+                    result_error_enum_ident = Some(error_enum_ident);
+                }
 
-                        #( #attrs )*
-                        pub struct #error_ident (pub core::num::NonZero<#repr>);
-                    },
+                EnumBuilderVariant::NewType {
                     is_bitfield,
-                    variant_attrs,
                     is_global,
-                    result_error_enum_ident: Some(error_ident),
+                    is_anonymous: enum_is_anonymous,
                 }
             }
-            EnumVariation::NewType {
-                is_bitfield,
-                is_global,
-                ..
-            } => EnumBuilder::NewType {
-                canonical_name: name,
-                tokens: quote! {
-                    #( #attrs )*
-                    pub struct #ident (pub #repr);
-                },
-                is_bitfield,
-                variant_attrs,
-                is_global,
-                result_error_enum_ident: None,
+
+            EnumVariation::Rust { non_exhaustive } => {
+                EnumBuilderVariant::Rust { non_exhaustive }
+            }
+
+            EnumVariation::Consts => EnumBuilderVariant::Consts {
+                needs_typedef: !has_typedef,
             },
 
-            EnumVariation::Rust { .. } => {
-                // `repr` is guaranteed to be Rustified in Enum::codegen
-                attrs.insert(0, quote! { #[repr( #repr )] });
-                let tokens = quote!();
-                EnumBuilder::Rust {
-                    attrs,
-                    ident,
-                    tokens,
-                    emitted_any_variants: false,
-                }
-            }
-
-            EnumVariation::Consts => {
-                let mut variants = Vec::new();
-
-                if !has_typedef {
-                    variants.push(quote! {
-                        #( #attrs )*
-                        pub type #ident = #repr;
-                    });
-                }
-
-                EnumBuilder::Consts {
-                    variants,
-                    variant_attrs,
-                }
-            }
-
             EnumVariation::ModuleConsts => {
-                let ident = Ident::new(
+                enum_ty = Ident::new(
                     CONSTIFIED_ENUM_MODULE_REPR_NAME,
                     Span::call_site(),
                 );
-                let type_definition = quote! {
-                    #( #attrs )*
-                    pub type #ident = #repr;
-                };
 
-                EnumBuilder::ModuleConsts {
-                    module_name: name,
-                    module_items: vec![type_definition],
-                    variant_attrs,
+                EnumBuilderVariant::ModuleConsts {
+                    module_name: ident.clone(),
                 }
             }
+        };
+        EnumBuilder {
+            ffi_type_ident: ident,
+            enum_type: enum_ty,
+            result_error_enum_ident,
+            attrs,
+            enum_repr,
+            variant_attrs,
+            kind,
         }
     }
 
@@ -3487,13 +3471,25 @@ impl<'a> EnumBuilder<'a> {
         self,
         ctx: &BindgenContext,
         variant: &EnumVariant,
+        variant_doc: proc_macro2::TokenStream,
         mangling_prefix: Option<&str>,
         rust_ty: &syn::Type,
-        result: &mut CodegenResult<'_>,
+        enum_variants: &mut Vec<EnumVariantInfo>,
         is_ty_named: bool,
     ) -> Self {
         let variant_name = ctx.rust_mangle(variant.name());
         let is_rust_enum = self.is_rust_enum();
+
+        // Block Zero variant, if we are represnting the C-enum as `Result<(), ErrorEnum>`
+        if self.result_error_enum_ident.is_some() &&
+            matches!(
+                variant.val(),
+                EnumVariantValue::Signed(0) | EnumVariantValue::Unsigned(0)
+            )
+        {
+            return self;
+        }
+
         let expr = match variant.val() {
             EnumVariantValue::Boolean(v) if is_rust_enum => {
                 helpers::ast_ty::uint_expr(u64::from(v))
@@ -3503,109 +3499,48 @@ impl<'a> EnumBuilder<'a> {
             EnumVariantValue::Unsigned(v) => helpers::ast_ty::uint_expr(v),
         };
 
-        let mut doc = quote! {};
-        if ctx.options().generate_comments {
-            if let Some(raw_comment) = variant.comment() {
-                let processed_comment =
-                    ctx.options().process_comment(raw_comment);
-                doc = attributes::doc(&processed_comment);
-                // hacky to push it into #doc, but whatever
-                for attrib in ctx
-                    .options()
-                    .parse_comments_for_attributes(raw_comment.as_ref())
-                {
-                    doc.append_all(attrib.to_tokenstream());
-                }
-            }
-        }
-
-        match self {
-            EnumBuilder::Rust {
-                attrs,
-                ident,
-                tokens,
-                emitted_any_variants: _,
-            } => {
+        match self.kind {
+            EnumBuilderVariant::Rust { .. } => {
                 let name = ctx.rust_ident(variant_name);
-                EnumBuilder::Rust {
-                    attrs,
-                    ident,
-                    // TODO: cfg attrs
-                    tokens: quote! {
-                        #tokens
-                        #doc
-                        #name = #expr,
-                    },
-                    emitted_any_variants: true,
-                }
+                enum_variants.push(EnumVariantInfo {
+                    variant_name: name,
+                    variant_doc,
+                    value: expr,
+                });
+                self
             }
 
-            EnumBuilder::NewType {
-                ref variant_attrs,
-                result_error_enum_ident: Some(ref enum_ident),
-                ..
-            } => {
-                assert!(is_ty_named);
-                if matches!(
-                    variant.val(),
-                    EnumVariantValue::Signed(0) | EnumVariantValue::Unsigned(0)
-                ) {
-                    return self;
-                }
-
-                let variant_ident = ctx.rust_ident(variant_name);
+            EnumBuilderVariant::NewType { is_global, .. } => {
+                let variant_ident = if is_ty_named && !is_global {
+                    ctx.rust_ident(variant_name)
+                } else {
+                    ctx.rust_ident(match mangling_prefix {
+                        Some(prefix) => {
+                            Cow::Owned(format!("{prefix}_{variant_name}"))
+                        }
+                        None => variant_name,
+                    })
+                };
                 // Wrapping the unwrap in the const block ensures we get
                 // a compile-time panic.
-                let expr = quote! { const { core::num::NonZero::new(#expr).unwrap() } };
+                let value = if let Some(enum_ident) =
+                    &self.result_error_enum_ident
+                {
+                    quote! { #enum_ident ( const { core::num::NonZero::new(#expr).unwrap() } )}
+                } else {
+                    quote! { #rust_ty ( #expr )}
+                };
 
-                result.push(quote! {
-                    #( #variant_attrs )*
-                    impl #enum_ident {
-                        #doc
-                        pub const #variant_ident : #enum_ident = #enum_ident ( #expr );
-                    }
+                enum_variants.push(EnumVariantInfo {
+                    variant_name: variant_ident,
+                    variant_doc,
+                    value,
                 });
 
                 self
             }
 
-            EnumBuilder::NewType {
-                canonical_name,
-                is_global,
-                ref variant_attrs,
-                ..
-            } => {
-                if is_ty_named && !is_global {
-                    let enum_ident = ctx.rust_ident(canonical_name);
-                    let variant_ident = ctx.rust_ident(variant_name);
-
-                    result.push(quote! {
-                        #( #variant_attrs )*
-                        impl #enum_ident {
-                            #doc
-                            pub const #variant_ident : #rust_ty = #rust_ty ( #expr );
-                        }
-                    });
-                } else {
-                    let ident = ctx.rust_ident(match mangling_prefix {
-                        Some(prefix) => {
-                            Cow::Owned(format!("{prefix}_{variant_name}"))
-                        }
-                        None => variant_name,
-                    });
-                    result.push(quote! {
-                        #doc
-                        #( #variant_attrs )*
-                        pub const #ident : #rust_ty = #rust_ty ( #expr );
-                    });
-                }
-
-                self
-            }
-
-            EnumBuilder::Consts {
-                ref variant_attrs, ..
-            } => {
+            EnumBuilderVariant::Consts { .. } => {
                 let constant_name = match mangling_prefix {
                     Some(prefix) => {
                         Cow::Owned(format!("{prefix}_{variant_name}"))
@@ -3615,32 +3550,22 @@ impl<'a> EnumBuilder<'a> {
 
                 let ident = ctx.rust_ident(constant_name);
 
-                result.push(quote! {
-                    #doc
-                    #( #variant_attrs )*
-                    pub const #ident : #rust_ty = #expr ;
+                enum_variants.push(EnumVariantInfo {
+                    variant_name: ident,
+                    variant_doc,
+                    value: quote! { #expr },
                 });
 
                 self
             }
-            EnumBuilder::ModuleConsts {
-                module_name,
-                mut module_items,
-                variant_attrs,
-            } => {
+            EnumBuilderVariant::ModuleConsts { .. } => {
                 let name = ctx.rust_ident(variant_name);
-                let ty = ctx.rust_ident(CONSTIFIED_ENUM_MODULE_REPR_NAME);
-                // TODO: cfg attrs
-                module_items.push(quote! {
-                    #doc
-                    pub const #name : #ty = #expr ;
+                enum_variants.push(EnumVariantInfo {
+                    variant_name: name,
+                    variant_doc,
+                    value: quote! { #expr },
                 });
-
-                EnumBuilder::ModuleConsts {
-                    module_name,
-                    module_items,
-                    variant_attrs,
-                }
+                self
             }
         }
     }
@@ -3649,41 +3574,145 @@ impl<'a> EnumBuilder<'a> {
         self,
         ctx: &BindgenContext,
         rust_ty: &syn::Type,
+        // Optionally place the enum bindings in a module
+        module: Option<syn::Ident>,
+        enum_variants: &[EnumVariantInfo],
         result: &mut CodegenResult<'_>,
     ) -> proc_macro2::TokenStream {
-        match self {
-            EnumBuilder::Rust {
-                attrs,
-                ident,
-                tokens,
-                emitted_any_variants,
+        let mut variant_idents = vec![];
+        let mut variant_values = vec![];
+        let mut variant_docs = vec![];
+        let variant_attrs = self.variant_attrs;
+        for v in enum_variants {
+            variant_idents.push(v.variant_name.clone());
+            variant_values.push(v.value.clone());
+            variant_docs.push(v.variant_doc.clone());
+        }
+
+        let enum_ident = &self.enum_type;
+
+        // 1. Construct a list of the enum variants
+        let variants = match self.kind {
+            EnumBuilderVariant::Rust { .. } => {
+                let mut variants = vec![];
+
+                for (variant_ident, variant_doc, variant_value) in
+                    izip!(&variant_idents, &variant_docs, &variant_values)
+                {
+                    variants.push(quote! {
+                        #variant_doc
+                        #variant_ident = #variant_value,
+                    });
+                }
+
+                if variants.is_empty() {
+                    variants.push(
+                        quote! {__bindgen_cannot_repr_c_on_empty_enum = 0,},
+                    )
+                }
+                variants
+            }
+            EnumBuilderVariant::NewType {
+                is_anonymous,
+                is_global,
                 ..
             } => {
-                let variants = if emitted_any_variants {
-                    tokens
-                } else {
-                    quote!(__bindgen_cannot_repr_c_on_empty_enum = 0)
-                };
+                let mut variants = vec![];
 
+                // Since we don't have an impl block in this case, we need to apply cfg attributes
+                // to each variant!
+                let variant_guard = (is_anonymous || is_global)
+                    .then(|| quote! { #(#variant_attrs)* });
+
+                for (variant_ident, variant_doc, variant_value) in
+                    izip!(&variant_idents, &variant_docs, &variant_values)
+                {
+                    variants.push(quote! {
+                        #variant_doc
+                        #variant_guard
+                        pub const #variant_ident: #enum_ident = #variant_value;
+                    });
+                }
+                variants
+            }
+            EnumBuilderVariant::Consts { .. } |
+            EnumBuilderVariant::ModuleConsts { .. } => {
+                let mut variants = vec![];
+
+                for (variant_ident, variant_doc, variant_value) in
+                    izip!(&variant_idents, &variant_docs, &variant_values)
+                {
+                    variants.push(quote! {
+                        #variant_doc
+                        pub const #variant_ident: #enum_ident = #variant_value;
+                    });
+                }
+                variants
+            }
+        };
+
+        let ident = &self.ffi_type_ident;
+
+        if let Some(ref err_enum_ident) = self.result_error_enum_ident {
+            result.push(quote! {
+                pub type #ident = Result<(), #err_enum_ident>;
+            })
+        }
+        let attrs = self.attrs;
+        let enum_repr = &self.enum_repr;
+
+        // 2. Generate the enum representation
+        let enum_ = match self.kind {
+            EnumBuilderVariant::Rust { non_exhaustive } => {
+                let non_exhaustive_opt =
+                    non_exhaustive.then(attributes::non_exhaustive);
                 quote! {
                     #( #attrs )*
+                    #[repr(#enum_repr)]
+                    #non_exhaustive_opt
                     pub enum #ident {
-                        #variants
+                        #( #variants )*
                     }
                 }
             }
-            EnumBuilder::NewType {
-                canonical_name,
-                tokens,
+            EnumBuilderVariant::NewType {
                 is_bitfield,
-                variant_attrs,
-                ..
+                is_global,
+                is_anonymous,
             } => {
+                // There doesn't seem to be a technical reason why we generate
+                // anon enum variants as global constants.
+                // We keep this behavior to avoid breaking changes in the bindings.
+                let impl_variants = if is_anonymous || is_global {
+                    quote! {
+                        #( #variants )*
+                    }
+                } else {
+                    quote! {
+                        #( #variant_attrs )*
+                        impl #enum_ident {
+                            #( #variants )*
+                        }
+                    }
+                };
+
+                let enum_repr = self.enum_repr;
+
+                let tokens = quote! {
+                    // Previously variant impls where before the enum definition.
+                    // lets keep this as is for now, to reduce the diff in generated bindings.
+                     #impl_variants
+
+                     #[repr(transparent)]
+                     #( #attrs )*
+                     pub struct #enum_ident (pub #enum_repr);
+
+                };
                 if !is_bitfield {
                     return tokens;
                 }
 
-                let rust_ty_name = ctx.rust_ident_raw(canonical_name);
+                let rust_ty_name = &self.enum_type;
                 let prefix = ctx.trait_prefix();
 
                 result.push(quote! {
@@ -3732,21 +3761,39 @@ impl<'a> EnumBuilder<'a> {
 
                 tokens
             }
-            EnumBuilder::Consts { variants, .. } => quote! { #( #variants )* },
-            EnumBuilder::ModuleConsts {
-                module_items,
-                module_name,
-                variant_attrs,
-                ..
-            } => {
-                let ident = ctx.rust_ident(module_name);
+            EnumBuilderVariant::Consts { needs_typedef } => {
+                let typedef_opt = needs_typedef.then(|| {
+                    quote! {
+                        #( #attrs )*
+                        pub type #enum_ident = #enum_repr;
+                    }
+                });
                 quote! {
-                    #( #variant_attrs )*
-                    pub mod #ident {
-                        #( #module_items )*
+                    #( #variants )*
+                    #typedef_opt
+                }
+            }
+            EnumBuilderVariant::ModuleConsts { module_name, .. } => {
+                quote! {
+                    // todo: Probably some attributes, e.g. `cfg` should apply to the `mod`.
+                    #(#variant_attrs)*
+                    pub mod #module_name {
+                        #( #attrs )*
+                        pub type #enum_ident = #enum_repr;
+
+                        #( #variants )*
                     }
                 }
             }
+        };
+        if let Some(module) = module {
+            quote! {
+                pub mod #module {
+                    #enum_
+                }
+            }
+        } else {
+            enum_
         }
     }
 }
@@ -3764,11 +3811,39 @@ impl CodeGenerator for Enum {
         debug!("<Enum as CodeGenerator>::codegen: item = {item:?}");
         debug_assert!(item.is_enabled_for_codegen(ctx));
 
+        let variation = self.computed_enum_variation(ctx, item);
+        self.codegen_variation(ctx, result, item, None, variation);
+        // let module = ctx.rust_ident("rustified_enum");
+        // Todo: add an option for additional rustified enum
+        // self.codegen_variation(ctx, result, item, Some(module), EnumVariation::Rust {non_exhaustive: true});
+    }
+}
+
+struct EnumVariantInfo {
+    variant_name: Ident,
+    variant_doc: proc_macro2::TokenStream,
+    value: proc_macro2::TokenStream,
+}
+
+impl Enum {
+    fn codegen_variation(
+        &self,
+        ctx: &BindgenContext,
+        result: &mut CodegenResult<'_>,
+        item: &Item,
+        module: Option<syn::Ident>,
+        variation: EnumVariation,
+    ) {
+        debug!("<Enum as CodeGenerator>::codegen: item = {item:?}");
+        debug_assert!(item.is_enabled_for_codegen(ctx));
+
         let name = item.canonical_name(ctx);
         let ident = ctx.rust_ident(&name);
         let enum_ty = item.expect_type();
         let layout = enum_ty.layout(ctx);
-        let variation = self.computed_enum_variation(ctx, item);
+
+        // Todo: We can add a callback here to allow renaming anon enums!
+        // let enum_ty_name = enum_ty.name().or_else(ctx.options.a)
 
         // blocklist anonymous enums based on variants.
         if enum_ty.name().is_none() &&
@@ -3804,11 +3879,10 @@ impl CodeGenerator for Enum {
                         _ => panic!("Unexpected type as enum repr"),
                     }
                 } else {
-                    warn!(
+                    panic!(
                         "Guessing type of enum! Forward declarations of enums \
                          shouldn't be legal!"
                     );
-                    IntKind::Int
                 };
 
                 let signed = kind.is_signed();
@@ -3842,28 +3916,6 @@ impl CodeGenerator for Enum {
 
         let mut attrs = vec![];
 
-        // TODO(emilio): Delegate this to the builders?
-        match variation {
-            EnumVariation::Rust { non_exhaustive } => {
-                if non_exhaustive &&
-                    ctx.options().rust_features().non_exhaustive
-                {
-                    attrs.push(attributes::non_exhaustive());
-                } else if non_exhaustive &&
-                    !ctx.options().rust_features().non_exhaustive
-                {
-                    panic!("The rust target you're using doesn't seem to support non_exhaustive enums");
-                }
-            }
-            EnumVariation::NewType { .. } => {
-                if true {
-                    attrs.push(attributes::repr("transparent"));
-                } else {
-                    attrs.push(attributes::repr("C"));
-                }
-            }
-            _ => {}
-        };
         let mut enum_variation_attrs = vec![];
         if let Some(comment) = item.comment(ctx) {
             let processed_comment =
@@ -3978,11 +4030,13 @@ impl CodeGenerator for Enum {
             variation,
             enum_variation_attrs,
             has_typedef,
+            enum_ty.name().is_none(),
         );
 
         // A map where we keep a value -> variant relation.
         let mut seen_values = HashMap::<_, Ident>::default();
         let enum_rust_ty = item.to_rust_ty_or_opaque(ctx, &());
+
         let is_toplevel = item.is_toplevel(ctx);
 
         // Used to mangle the constants we generate in the unnamed-enum case.
@@ -4007,6 +4061,8 @@ impl CodeGenerator for Enum {
         // do).
         let mut constified_variants = VecDeque::new();
 
+        let mut enum_variants = vec![];
+
         let mut iter = self.variants().iter().peekable();
         while let Some(variant) =
             iter.next().or_else(|| constified_variants.pop_front())
@@ -4018,6 +4074,22 @@ impl CodeGenerator for Enum {
             if variant.force_constification() && iter.peek().is_some() {
                 constified_variants.push_back(variant);
                 continue;
+            }
+
+            let mut variant_doc = quote! {};
+            if ctx.options().generate_comments {
+                if let Some(raw_comment) = variant.comment() {
+                    let processed_comment =
+                        ctx.options().process_comment(raw_comment);
+                    variant_doc = attributes::doc(&processed_comment);
+                    // hacky to push it into #variant_doc, but whatever
+                    for attrib in ctx
+                        .options()
+                        .parse_comments_for_attributes(raw_comment.as_ref())
+                    {
+                        variant_doc.append_all(attrib.to_tokenstream());
+                    }
+                }
             }
 
             match seen_values.entry(variant.val()) {
@@ -4041,11 +4113,10 @@ impl CodeGenerator for Enum {
                             let enum_canonical_name = &ident;
                             let variant_name =
                                 ctx.rust_ident_raw(&*mangled_name);
-                            result.push(quote! {
-                                impl #enum_rust_ty {
-                                    pub const #variant_name : #enum_rust_ty =
-                                        #enum_canonical_name :: #existing_variant_name ;
-                                }
+                            enum_variants.push( EnumVariantInfo {
+                                variant_name: variant_name.clone(),
+                                variant_doc,
+                                value: quote!{ #enum_canonical_name :: #existing_variant_name},
                             });
                         } else {
                             add_constant(
@@ -4062,9 +4133,10 @@ impl CodeGenerator for Enum {
                         builder = builder.with_variant(
                             ctx,
                             variant,
+                            variant_doc,
                             constant_mangling_prefix,
                             &enum_rust_ty,
-                            result,
+                            &mut enum_variants,
                             enum_ty.name().is_some(),
                         );
                     }
@@ -4073,9 +4145,10 @@ impl CodeGenerator for Enum {
                     builder = builder.with_variant(
                         ctx,
                         variant,
+                        variant_doc.clone(),
                         constant_mangling_prefix,
                         &enum_rust_ty,
-                        result,
+                        &mut enum_variants,
                         enum_ty.name().is_some(),
                     );
 
@@ -4115,7 +4188,8 @@ impl CodeGenerator for Enum {
             }
         }
 
-        let item = builder.build(ctx, &enum_rust_ty, result);
+        let item =
+            builder.build(ctx, &enum_rust_ty, module, &enum_variants, result);
         result.push(item);
     }
 }
