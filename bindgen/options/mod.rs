@@ -438,6 +438,27 @@ options! {
         },
         as_args: "--newtype-enum",
     },
+     /// Generate an **additional** rustified `enum`s, which can be converted from the FFI-safe
+     /// representation.
+    safe_rust_enums: RegexSet {
+        methods: {
+            regex_option! {
+                /// Generate a rustified `enum` **in addition** to an FFI-safe representation
+                ///
+                /// Regular rustified enums are not FFI-safe, since unknown variants are
+                /// immediate undefined behavior. This option allows generating a secondary
+                /// rustified enum representation, with From implemementation to conveninetly
+                /// convert the FFI-safe representation to the rustified enum.
+                ///
+                /// The rustified enum is placed in a module.
+                pub fn safe_rust_enums<T: AsRef<str>>(mut self, arg: T) -> Builder {
+                    self.options.safe_rust_enums.insert(arg);
+                    self
+                }
+            }
+        },
+        as_args: "--safe-rust-enum",
+    },
    /// `enum`s marked as `Result<(), ErrorEnum>`.
     result_error_enums: RegexSet {
         methods: {

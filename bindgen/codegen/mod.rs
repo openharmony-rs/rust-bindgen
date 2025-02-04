@@ -3575,7 +3575,7 @@ impl EnumBuilder {
         ctx: &BindgenContext,
         rust_ty: &syn::Type,
         // Optionally place the enum bindings in a module
-        module: Option<syn::Ident>,
+        module: Option<Ident>,
         enum_variants: &[EnumVariantInfo],
         result: &mut CodegenResult<'_>,
     ) -> proc_macro2::TokenStream {
@@ -3813,9 +3813,27 @@ impl CodeGenerator for Enum {
 
         let variation = self.computed_enum_variation(ctx, item);
         self.codegen_variation(ctx, result, item, None, variation);
-        // let module = ctx.rust_ident("rustified_enum");
-        // Todo: add an option for additional rustified enum
-        // self.codegen_variation(ctx, result, item, Some(module), EnumVariation::Rust {non_exhaustive: true});
+        // todo: expose options for:
+        // - non-exhaustive
+        // - disambiguation: module-name / rename enum ( callback ?)
+        // - Variant-Casing
+        // perhaps we just make the additional enum a callback?
+        if ctx
+            .options()
+            .safe_rust_enums
+            .matches(item.canonical_name(ctx))
+        {
+            let module = ctx.rust_ident("rustified_enum");
+            self.codegen_variation(
+                ctx,
+                result,
+                item,
+                Some(module),
+                EnumVariation::Rust {
+                    non_exhaustive: true,
+                },
+            );
+        }
     }
 }
 
@@ -3831,7 +3849,7 @@ impl Enum {
         ctx: &BindgenContext,
         result: &mut CodegenResult<'_>,
         item: &Item,
-        module: Option<syn::Ident>,
+        module: Option<Ident>,
         variation: EnumVariation,
     ) {
         debug!("<Enum as CodeGenerator>::codegen: item = {item:?}");
