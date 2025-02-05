@@ -3521,20 +3521,11 @@ impl EnumBuilder {
                         None => variant_name,
                     })
                 };
-                // Wrapping the unwrap in the const block ensures we get
-                // a compile-time panic.
-                let value = if let Some(enum_ident) =
-                    &self.result_error_enum_ident
-                {
-                    quote! { #enum_ident ( const { core::num::NonZero::new(#expr).unwrap() } )}
-                } else {
-                    quote! { #rust_ty ( #expr )}
-                };
 
                 enum_variants.push(EnumVariantInfo {
                     variant_name: variant_ident,
                     variant_doc,
-                    value,
+                    value: expr,
                 });
 
                 self
@@ -3627,10 +3618,20 @@ impl EnumBuilder {
                 for (variant_ident, variant_doc, variant_value) in
                     izip!(&variant_idents, &variant_docs, &variant_values)
                 {
+                    let value = if let Some(enum_ident) =
+                        &self.result_error_enum_ident
+                    {
+                        // Wrapping the unwrap in the const block ensures we get
+                        // a compile-time panic.
+                        quote! { #enum_ident ( const { core::num::NonZero::new(#variant_value).unwrap() } )}
+                    } else {
+                        quote! { #rust_ty(#variant_value) }
+                    };
+
                     variants.push(quote! {
                         #variant_doc
                         #variant_guard
-                        pub const #variant_ident: #enum_ident = #variant_value;
+                        pub const #variant_ident: #enum_ident = #value;
                     });
                 }
                 variants
