@@ -2356,7 +2356,9 @@ impl CodeGenerator for CompInfo {
                     });
                 }
                 None => {
-                    warn!("Opaque type without layout! Expect dragons!");
+                    if !forward_decl {
+                        warn!("Opaque type without layout! Expect dragons!");
+                    }
                 }
             }
         } else if !is_union && !zero_sized {
