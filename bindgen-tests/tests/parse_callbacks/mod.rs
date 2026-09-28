@@ -1,7 +1,7 @@
 mod item_discovery_callback;
 
 use bindgen::callbacks::*;
-use bindgen::FieldVisibilityKind;
+use bindgen::{CodeGenAttributes, FieldVisibilityKind};
 
 #[derive(Debug)]
 pub struct RemovePrefixParseCallback {
@@ -146,8 +146,28 @@ impl ParseCallbacks for WrapAsVariadicFn {
     }
 }
 
+/// Marks the comments that it processes, and adds the comments that it parses
+/// for attributes as documentation, to show which form of the comment each
+/// callback gets.
+#[derive(Debug)]
+struct CommentAttributes;
+
+impl ParseCallbacks for CommentAttributes {
+    fn process_comment(&self, comment: &str) -> Option<String> {
+        Some(format!("{comment} (processed)"))
+    }
+
+    fn parse_comments_for_attributes(
+        &self,
+        comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        vec![CodeGenAttributes::Doc(format!("Parsed:{comment}"))]
+    }
+}
+
 pub fn lookup(cb: &str) -> Box<dyn ParseCallbacks> {
     match cb {
+        "comment-attributes" => Box::new(CommentAttributes),
         "enum-variant-rename" => Box::new(EnumVariantRename),
         "blocklisted-type-implements-trait" => {
             Box::new(BlocklistedTypeImplementsTrait)

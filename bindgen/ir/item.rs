@@ -503,16 +503,15 @@ impl Item {
             1
     }
 
-    /// Get this `Item`'s comment, if it has any, already preprocessed and with
-    /// the right indentation.
-    pub(crate) fn comment(&self, ctx: &BindgenContext) -> Option<String> {
+    /// Get this `Item`'s comment as written in the source, if it has any and
+    /// comments are generated. It needs to be processed with
+    /// `BindgenOptions::process_comment` before it is emitted.
+    pub(crate) fn raw_comment(&self, ctx: &BindgenContext) -> Option<&str> {
         if !ctx.options().generate_comments {
             return None;
         }
 
-        self.comment
-            .as_ref()
-            .map(|comment| ctx.options().process_comment(comment))
+        self.comment.as_deref()
     }
 
     /// What kind of item is this?
