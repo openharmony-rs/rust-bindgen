@@ -684,11 +684,10 @@ impl CodeGenerator for Var {
         }
 
         let mut attrs = vec![];
-        if let Some(comment) = item.comment(ctx) {
-            let processed_comment = ctx.options().process_comment(&comment);
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
             attrs.push(attributes::doc(&processed_comment));
-            for attrib in ctx.options().parse_comments_for_attributes(&comment)
-            {
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
                 attrs.push(attrib.to_tokenstream());
             }
         }
@@ -900,12 +899,12 @@ impl CodeGenerator for Type {
 
                 let rust_name = ctx.rust_ident(name);
 
-                let mut tokens = if let Some(comment) = item.comment(ctx) {
+                let mut tokens = if let Some(comment) = item.raw_comment(ctx) {
                     let processed_comment =
-                        ctx.options().process_comment(&comment);
+                        ctx.options().process_comment(comment);
                     let mut attrs = attributes::doc(&processed_comment);
                     for attrib in
-                        ctx.options().parse_comments_for_attributes(&comment)
+                        ctx.options().parse_comments_for_attributes(comment)
                     {
                         attrs.append_all(attrib.to_tokenstream());
                     }
@@ -1028,12 +1027,12 @@ impl CodeGenerator for Type {
                     );
                 });
 
-                let mut tokens = if let Some(comment) = item.comment(ctx) {
+                let mut tokens = if let Some(comment) = item.raw_comment(ctx) {
                     let processed_comment =
-                        ctx.options().process_comment(&comment);
+                        ctx.options().process_comment(comment);
                     let mut attrs = attributes::doc(&processed_comment);
                     for attrib in
-                        ctx.options().parse_comments_for_attributes(&comment)
+                        ctx.options().parse_comments_for_attributes(comment)
                     {
                         attrs.append_all(attrib.to_tokenstream());
                     }
@@ -2457,15 +2456,12 @@ impl CodeGenerator for CompInfo {
         let type_id = item.id().expect_type_id(ctx);
 
         if let Some(comment) = item
-            .comment(ctx)
+            .raw_comment(ctx)
             .or_else(|| Self::get_typedef_fallback_comment(ctx, &type_id))
         {
-            let processed_comment = ctx.options().process_comment(&comment);
+            let processed_comment = ctx.options().process_comment(comment);
             attributes.push(attributes::doc(&processed_comment));
-            for attrib in ctx
-                .options()
-                .parse_comments_for_attributes(comment.as_ref())
-            {
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
                 if matches!(
                     attrib,
                     CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
@@ -3072,14 +3068,14 @@ impl CompInfo {
     /// To avoid this, we check here if there is any type alias to this type, which has
     /// the same canonical path and return the comment as a fallback, if our type does
     /// not have documentation.
-    fn get_typedef_fallback_comment(
-        ctx: &BindgenContext,
+    fn get_typedef_fallback_comment<'a>(
+        ctx: &'a BindgenContext,
         type_id: &crate::ir::context::TypeId,
-    ) -> Option<String> {
+    ) -> Option<&'a str> {
         if !ctx.options().generate_comments {
             return None;
         }
-        let type_alias_comment = ctx
+        let mut type_alias_comment = ctx
             .items()
             .filter(|(_id, alias)| {
                 let Some(this_ty) = alias.as_type() else {
@@ -3098,9 +3094,8 @@ impl CompInfo {
                     _ => false,
                 }
             })
-            .filter_map(|(_id, item)| item.comment(ctx));
-        let alias_comment: Vec<String> = type_alias_comment.collect();
-        alias_comment.get(0).cloned()
+            .filter_map(|(_id, item)| item.raw_comment(ctx));
+        type_alias_comment.next()
     }
 }
 
@@ -3985,14 +3980,10 @@ impl Enum {
         let mut attrs = vec![];
 
         let mut enum_variation_attrs = vec![];
-        if let Some(comment) = item.comment(ctx) {
-            let processed_comment =
-                ctx.options().process_comment(comment.as_ref());
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
             attrs.push(attributes::doc(&processed_comment));
-            for attrib in ctx
-                .options()
-                .parse_comments_for_attributes(comment.as_ref())
-            {
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
                 if matches!(
                     attrib,
                     CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
@@ -4958,14 +4949,10 @@ impl CodeGenerator for Function {
             }
         }
 
-        if let Some(comment) = item.comment(ctx) {
-            let processed_comment =
-                ctx.options().process_comment(comment.as_ref());
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
             attributes.push(attributes::doc(&processed_comment));
-            for attrib in ctx
-                .options()
-                .parse_comments_for_attributes(comment.as_ref())
-            {
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
                 attributes.push(attrib.to_tokenstream());
             }
         }
