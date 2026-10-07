@@ -2639,7 +2639,10 @@ impl CodeGenerator for CompInfo {
             // The only trait we can derive for forward declared types is `Debug`,
             // since we don't know anything about the layout or type.
             let mut derivable_traits = DerivableTraits::empty();
-            if !item.annotations().disallow_debug() {
+            if ctx.options().derive_debug &&
+                !ctx.no_debug_by_name(item) &&
+                !item.annotations().disallow_debug()
+            {
                 derivable_traits |= DerivableTraits::DEBUG;
             }
             derivable_traits
