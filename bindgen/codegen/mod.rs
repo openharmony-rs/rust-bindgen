@@ -3790,6 +3790,17 @@ impl CodeGenerator for Enum {
         let layout = enum_ty.layout(ctx);
         let variation = self.computed_enum_variation(ctx, item);
 
+        // blocklist anonymous enums if all variants match a regex.
+        if enum_ty.name().is_none() &&
+            !self.variants().is_empty() &&
+            self.variants()
+                .iter()
+                .all(|v| ctx.options().blocklisted_items.matches(v.name()))
+        {
+            debug!("Blocklisting anonymous enum.");
+            return;
+        }
+
         let repr_translated;
         let repr = match self.repr().map(|repr| ctx.resolve_type(repr)) {
             Some(repr)
