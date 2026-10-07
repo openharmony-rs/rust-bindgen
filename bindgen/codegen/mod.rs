@@ -3816,6 +3816,7 @@ impl EnumBuilder {
         if let Some(ref error_enum_ident) = self.result_error_enum_ident {
             let ffi_type_ident = &self.ffi_type_ident;
             result.push(quote! {
+                #( #cfg_attrs )*
                 pub type #ffi_type_ident = Result<(), #error_enum_ident>;
             });
         }

@@ -1,4 +1,4 @@
-// bindgen-flags: --no-layout-tests --newtype-enum NewtypeEnum --bitfield-enum BitfieldEnum --newtype-global-enum GlobalEnum --constified-enum-module ModuleEnum --constified-enum ConstsEnum
+// bindgen-flags: --no-layout-tests --newtype-enum NewtypeEnum --bitfield-enum BitfieldEnum --newtype-global-enum GlobalEnum --constified-enum-module ModuleEnum --constified-enum ConstsEnum --result-error-enum ResultEnum
 // bindgen-parse-callbacks: comment-cfg-attributes
 
 /** A struct with bitfield accessors, cfg-guarded. */
@@ -44,6 +44,12 @@ enum ConstsEnum {
 enum {
     AnonA,
     AnonB,
+};
+
+/** A result enum, cfg-guarded. */
+enum ResultEnum {
+    ResultOk = 0,
+    ResultErr,
 };
 
 /** A variable, cfg-guarded. */

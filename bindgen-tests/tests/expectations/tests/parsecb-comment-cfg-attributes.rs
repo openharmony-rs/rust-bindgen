@@ -495,6 +495,22 @@ pub const AnonB: _bindgen_ty_1 = 1;
 #[cfg(any())]
 #[cfg_attr(all(), allow(dead_code))]
 pub type _bindgen_ty_1 = ::std::os::raw::c_uint;
+#[cfg(any())]
+#[cfg_attr(all(), allow(dead_code))]
+pub type ResultEnum = Result<(), ResultEnumError>;
+#[cfg(any())]
+#[cfg_attr(all(), allow(dead_code))]
+impl ResultEnumError {
+    pub const ResultErr: ResultEnumError = ResultEnumError(const {
+        core::num::NonZero::new(1).unwrap()
+    });
+}
+#[repr(transparent)]
+/// A result enum, cfg-guarded.
+#[cfg(any())]
+#[cfg_attr(all(), allow(dead_code))]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct ResultEnumError(pub core::num::NonZero<::std::os::raw::c_uint>);
 unsafe extern "C" {
     /// A variable, cfg-guarded.
     #[cfg(any())]
