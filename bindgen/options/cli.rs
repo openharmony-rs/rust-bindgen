@@ -187,6 +187,9 @@ struct BindgenCommand {
     /// Mark any enum whose name matches REGEX as a global newtype.
     #[arg(long, value_name = "REGEX")]
     newtype_global_enum: Vec<String>,
+    /// Mark any enum whose name matches REGEX as a `Result<(), ErrorEnum>`, where `ErrorEnum` is a `NonZero` newtype.
+    #[arg(long, value_name = "REGEX")]
+    result_error_enum: Vec<String>,
     /// Mark any enum whose name matches REGEX as a Rust enum.
     #[arg(long, value_name = "REGEX")]
     rustified_enum: Vec<String>,
@@ -595,6 +598,7 @@ where
         bitfield_enum,
         newtype_enum,
         newtype_global_enum,
+        result_error_enum,
         rustified_enum,
         rustified_non_exhaustive_enum,
         constified_enum,
@@ -907,6 +911,7 @@ where
             default_enum_style,
             bitfield_enum,
             newtype_enum,
+            result_error_enum,
             newtype_global_enum,
             rustified_enum,
             rustified_non_exhaustive_enum,

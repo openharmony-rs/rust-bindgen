@@ -212,6 +212,20 @@ impl ParseCallbacks for CommentCfgAttributes {
 }
 
 #[derive(Debug)]
+struct ResultErrorEnumRename;
+
+impl ParseCallbacks for ResultErrorEnumRename {
+    fn result_error_enum_name(
+        &self,
+        original_enum_name: &str,
+    ) -> Option<String> {
+        original_enum_name
+            .strip_suffix("Result")
+            .map(|base| format!("{base}ErrorCode"))
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct OperatorRename;
 
 impl ParseCallbacks for OperatorRename {
@@ -228,6 +242,7 @@ pub fn lookup(cb: &str) -> Box<dyn ParseCallbacks> {
     match cb {
         "comment-attributes" => Box::new(CommentAttributes),
         "comment-cfg-attributes" => Box::new(CommentCfgAttributes),
+        "result-error-enum-rename" => Box::new(ResultErrorEnumRename),
         "enum-variant-rename" => Box::new(EnumVariantRename),
         "struct-field-rename" => Box::new(StructFieldRename),
         "blocklisted-type-implements-trait" => {

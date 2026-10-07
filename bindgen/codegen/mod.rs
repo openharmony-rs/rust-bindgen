@@ -3363,6 +3363,9 @@ pub enum EnumVariation {
         is_bitfield: bool,
         /// Indicates whether the variants will be represented as global constants
         is_global: bool,
+        /// Indicates whether this enum is a result type, where 0 indicates success.
+        /// The enum will then be a `NonZero` type, and usages wrapped in `Result`.
+        is_result_type: bool,
     },
     /// The code for this enum will use consts
     #[default]
@@ -3397,7 +3400,13 @@ impl fmt::Display for EnumVariation {
             } => "bitfield",
             Self::NewType {
                 is_bitfield: false,
+                is_global: false,
+                is_result_type: true,
+            } => "result_error_enum",
+            Self::NewType {
+                is_bitfield: false,
                 is_global,
+                ..
             } => {
                 if *is_global {
                     "newtype_global"
@@ -3427,23 +3436,31 @@ impl FromStr for EnumVariation {
             "bitfield" => Ok(EnumVariation::NewType {
                 is_bitfield: true,
                 is_global: false,
+                is_result_type: false,
             }),
             "consts" => Ok(EnumVariation::Consts),
             "moduleconsts" => Ok(EnumVariation::ModuleConsts),
             "newtype" => Ok(EnumVariation::NewType {
                 is_bitfield: false,
                 is_global: false,
+                is_result_type: false,
             }),
             "newtype_global" => Ok(EnumVariation::NewType {
                 is_bitfield: false,
                 is_global: true,
+                is_result_type: false,
+            }),
+            "result_error_enum" => Ok(EnumVariation::NewType {
+                is_bitfield: false,
+                is_global: false,
+                is_result_type: true,
             }),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 concat!(
                     "Got an invalid EnumVariation. Accepted values ",
                     "are 'rust', 'rust_non_exhaustive', 'bitfield', 'consts',",
-                    "'moduleconsts', 'newtype' and 'newtype_global'."
+                    "'moduleconsts', 'newtype', 'newtype_global' and 'result_error_enum'."
                 ),
             )),
         }
@@ -3451,17 +3468,22 @@ impl FromStr for EnumVariation {
 }
 
 struct EnumBuilder {
+    /// Identifier of the type used in the FFI bindings
+    ffi_type_ident: Ident,
     /// Type identifier of the enum.
     ///
     /// This is the base name, i.e. for `ModuleConst` enums, this does not include the module name.
     enum_type: Ident,
+    /// If the FFI-binding is a type-alias to `Result<(), ErrorType>`,
+    /// then `result_error_enum_ident` is the identifier used for `ErrorType`.
+    result_error_enum_ident: Option<Ident>,
     /// Attributes applying to the enum type
     attrs: Vec<proc_macro2::TokenStream>,
     /// `cfg` attributes of the enum, which also need to be applied to the items emitted next to
     /// the enum type.
     cfg_attrs: Vec<proc_macro2::TokenStream>,
-    /// The representation of the enum, e.g. `u32`.
-    repr: syn::Type,
+    /// The representation of the enum, e.g. `u32` or `NonZero<u32>`.
+    repr: proc_macro2::TokenStream,
     /// The enum kind we are generating
     kind: EnumBuilderKind,
     /// A list of all variants this enum has.
@@ -3495,8 +3517,10 @@ impl EnumBuilder {
 
     /// Create a new enum given an item builder, a canonical name, a name for
     /// the representation, and which variation it should be generated as.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         name: &str,
+        ctx: &BindgenContext,
         attrs: Vec<proc_macro2::TokenStream>,
         cfg_attrs: Vec<proc_macro2::TokenStream>,
         repr: &syn::Type,
@@ -3507,16 +3531,33 @@ impl EnumBuilder {
         let ident = Ident::new(name, Span::call_site());
         // For most variants this is the same
         let mut enum_ty = ident.clone();
+        let mut enum_repr = quote! { #repr };
+        let mut result_error_enum_ident = None;
 
         let kind = match enum_variation {
             EnumVariation::NewType {
                 is_bitfield,
                 is_global,
-            } => EnumBuilderKind::NewType {
-                is_bitfield,
-                is_global,
-                is_anonymous: enum_is_anonymous,
-            },
+                is_result_type,
+            } => {
+                if is_result_type {
+                    let error_enum_name = ctx
+                        .options()
+                        .last_callback(|c| c.result_error_enum_name(name))
+                        .unwrap_or(format!("{name}Error"));
+                    let error_enum_ident =
+                        Ident::new(&error_enum_name, Span::call_site());
+                    enum_repr = quote! { core::num::NonZero<#repr> };
+                    enum_ty = error_enum_ident.clone();
+                    result_error_enum_ident = Some(error_enum_ident);
+                }
+
+                EnumBuilderKind::NewType {
+                    is_bitfield,
+                    is_global,
+                    is_anonymous: enum_is_anonymous,
+                }
+            }
 
             EnumVariation::Rust { non_exhaustive } => {
                 EnumBuilderKind::Rust { non_exhaustive }
@@ -3538,10 +3579,12 @@ impl EnumBuilder {
             }
         };
         EnumBuilder {
+            ffi_type_ident: ident,
             enum_type: enum_ty,
+            result_error_enum_ident,
             attrs,
             cfg_attrs,
-            repr: repr.clone(),
+            repr: enum_repr,
             kind,
             enum_variants: vec![],
         }
@@ -3559,6 +3602,17 @@ impl EnumBuilder {
     ) -> Self {
         let variant_name = ctx.rust_mangle(variant.name());
         let is_rust_enum = self.is_rust_enum();
+
+        // Skip the zero variant if we are representing the C-enum as `Result<(), ErrorEnum>`
+        if self.result_error_enum_ident.is_some() &&
+            matches!(
+                variant.val(),
+                EnumVariantValue::Signed(0) | EnumVariantValue::Unsigned(0)
+            )
+        {
+            return self;
+        }
+
         let expr = match variant.val() {
             EnumVariantValue::Boolean(v) if is_rust_enum => {
                 helpers::ast_ty::uint_expr(u64::from(v))
@@ -3590,10 +3644,19 @@ impl EnumBuilder {
                         None => variant_name,
                     })
                 };
+                let value = if let Some(error_enum_ident) =
+                    &self.result_error_enum_ident
+                {
+                    // Wrapping the unwrap in the const block ensures we get
+                    // a compile-time panic.
+                    quote! { #error_enum_ident ( const { core::num::NonZero::new(#expr).unwrap() } )}
+                } else {
+                    quote! { #rust_ty ( #expr )}
+                };
                 self.enum_variants.push(EnumVariantInfo {
                     variant_name: variant_ident,
                     variant_doc,
-                    value: quote! { #rust_ty ( #expr )},
+                    value,
                 });
 
                 self
@@ -3674,6 +3737,7 @@ impl EnumBuilder {
         self,
         ctx: &BindgenContext,
         rust_ty: &syn::Type,
+        result: &mut CodegenResult<'_>,
     ) -> proc_macro2::TokenStream {
         let enum_ident = self.enum_type;
         let cfg_attrs = self.cfg_attrs;
@@ -3749,6 +3813,12 @@ impl EnumBuilder {
                 variants
             }
         };
+        if let Some(ref error_enum_ident) = self.result_error_enum_ident {
+            let ffi_type_ident = &self.ffi_type_ident;
+            result.push(quote! {
+                pub type #ffi_type_ident = Result<(), #error_enum_ident>;
+            });
+        }
         let attrs = self.attrs;
         let enum_repr = &self.repr;
 
@@ -4039,6 +4109,7 @@ impl CodeGenerator for Enum {
         // FIXME: The constants generated by `add_constant` are not guarded by `cfg_attrs`.
         let mut builder = EnumBuilder::new(
             &name,
+            ctx,
             attrs,
             cfg_attrs,
             &repr,
@@ -4198,7 +4269,7 @@ impl CodeGenerator for Enum {
             }
         }
 
-        let item = builder.build(ctx, &enum_rust_ty);
+        let item = builder.build(ctx, &enum_rust_ty, result);
         result.push(item);
     }
 }
