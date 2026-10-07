@@ -2,7 +2,7 @@ mod add_derives_callback;
 mod item_discovery_callback;
 
 use bindgen::callbacks::*;
-use bindgen::FieldVisibilityKind;
+use bindgen::{CodeGenAttributes, FieldVisibilityKind};
 
 #[derive(Debug)]
 pub struct RemovePrefixParseCallback {
@@ -168,6 +168,49 @@ impl ParseCallbacks for WrapAsVariadicFn {
     }
 }
 
+/// Marks the comments that it processes, and adds the comments that it parses
+/// for attributes as documentation, to show which form of the comment each
+/// callback gets.
+#[derive(Debug)]
+struct CommentAttributes;
+
+impl ParseCallbacks for CommentAttributes {
+    fn process_comment(&self, comment: &str) -> Option<String> {
+        Some(format!("{comment} (processed)"))
+    }
+
+    fn parse_comments_for_attributes(
+        &self,
+        comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        vec![CodeGenAttributes::Doc(format!("Parsed:{comment}"))]
+    }
+}
+
+/// Adds an always-false `cfg` and a `cfg_attr` to items whose comment contains
+/// `cfg-guarded`. Compiling the expectation catches items which use a guarded
+/// item without being guarded themselves.
+#[derive(Debug)]
+struct CommentCfgAttributes;
+
+impl ParseCallbacks for CommentCfgAttributes {
+    fn parse_comments_for_attributes(
+        &self,
+        comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        if comment.contains("cfg-guarded") {
+            vec![
+                CodeGenAttributes::Cfg("any()".to_string()),
+                CodeGenAttributes::CfgAttr(
+                    "all(), allow(dead_code)".to_string(),
+                ),
+            ]
+        } else {
+            vec![]
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct OperatorRename;
 
@@ -183,6 +226,8 @@ impl ParseCallbacks for OperatorRename {
 
 pub fn lookup(cb: &str) -> Box<dyn ParseCallbacks> {
     match cb {
+        "comment-attributes" => Box::new(CommentAttributes),
+        "comment-cfg-attributes" => Box::new(CommentCfgAttributes),
         "enum-variant-rename" => Box::new(EnumVariantRename),
         "struct-field-rename" => Box::new(StructFieldRename),
         "blocklisted-type-implements-trait" => {

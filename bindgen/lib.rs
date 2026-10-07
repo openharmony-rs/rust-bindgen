@@ -47,6 +47,7 @@ mod ir;
 mod parse;
 mod regex_set;
 
+pub use codegen::CodeGenAttributes;
 pub use codegen::{
     AliasVariation, EnumVariation, MacroTypeVariation, NonCopyUnionStyle,
 };
@@ -600,6 +601,14 @@ impl BindgenOptions {
         let comment = comment::preprocess(comment);
         self.last_callback(|cb| cb.process_comment(&comment))
             .unwrap_or(comment)
+    }
+
+    fn parse_comments_for_attributes(
+        &self,
+        comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        let comment = comment::preprocess(comment);
+        self.all_callbacks(|cb| cb.parse_comments_for_attributes(&comment))
     }
 }
 

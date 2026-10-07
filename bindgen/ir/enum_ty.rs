@@ -309,6 +309,11 @@ impl EnumVariant {
         self.val
     }
 
+    /// Get this variant's documentation comment as written in the source.
+    pub(crate) fn raw_comment(&self) -> Option<&str> {
+        self.comment.as_deref()
+    }
+
     /// Get this variant's documentation comment, if it has any, already preprocessed
     /// and with the right indentation. Returns `None` if comment generation is disabled.
     pub(crate) fn doc_comment(&self, ctx: &BindgenContext) -> Option<String> {

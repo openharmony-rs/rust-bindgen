@@ -4,6 +4,7 @@ pub use crate::ir::analysis::DeriveTrait;
 pub use crate::ir::derive::CanDerive as ImplementsTrait;
 pub use crate::ir::enum_ty::{EnumVariantCustomBehavior, EnumVariantValue};
 pub use crate::ir::int::IntKind;
+use crate::CodeGenAttributes;
 pub use cexpr::token::Kind as TokenKind;
 pub use cexpr::token::Token;
 use std::fmt;
@@ -174,6 +175,22 @@ pub trait ParseCallbacks: fmt::Debug {
     /// Process a source code comment.
     fn process_comment(&self, _comment: &str) -> Option<String> {
         None
+    }
+
+    /// Add attributes to an item based on its documentation comment.
+    ///
+    /// The comment is passed after bindgen's own preprocessing, but before
+    /// [`ParseCallbacks::process_comment`] is applied. This is only called if comments
+    /// are generated, and not for struct fields.
+    ///
+    /// `cfg` and `cfg_attr` attributes returned for a struct or an enum are also applied
+    /// to the `impl` blocks, constants and modules generated for it, so they need to be
+    /// valid there. Some generated items, e.g. layout tests, are not guarded.
+    fn parse_comments_for_attributes(
+        &self,
+        _comment: &str,
+    ) -> Vec<CodeGenAttributes> {
+        vec![]
     }
 
     /// Potentially override the visibility of a composite type field.

@@ -59,6 +59,7 @@ use proc_macro2::{Ident, Span};
 use quote::{ToTokens, TokenStreamExt};
 
 use crate::{Entry, HashMap, HashSet};
+pub use helpers::attributes::Attribute as CodeGenAttributes;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -720,8 +721,12 @@ impl CodeGenerator for Var {
         }
 
         let mut attrs = vec![];
-        if let Some(comment) = item.comment(ctx) {
-            attrs.push(attributes::doc(&comment));
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
+            attrs.push(attributes::doc(&processed_comment));
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
+                attrs.push(attrib.to_tokenstream());
+            }
         }
 
         let var_ty = self.ty();
@@ -963,8 +968,16 @@ impl CodeGenerator for Type {
 
                 let rust_name = ctx.rust_ident(name);
 
-                let mut tokens = if let Some(comment) = item.comment(ctx) {
-                    attributes::doc(&comment)
+                let mut tokens = if let Some(comment) = item.raw_comment(ctx) {
+                    let processed_comment =
+                        ctx.options().process_comment(comment);
+                    let mut attrs = attributes::doc(&processed_comment);
+                    for attrib in
+                        ctx.options().parse_comments_for_attributes(comment)
+                    {
+                        attrs.append_all(attrib.to_tokenstream());
+                    }
+                    attrs
                 } else {
                     quote! {}
                 };
@@ -1073,8 +1086,16 @@ impl CodeGenerator for Type {
                     }
                 });
 
-                let mut tokens = if let Some(comment) = item.comment(ctx) {
-                    attributes::doc(&comment)
+                let mut tokens = if let Some(comment) = item.raw_comment(ctx) {
+                    let processed_comment =
+                        ctx.options().process_comment(comment);
+                    let mut attrs = attributes::doc(&processed_comment);
+                    for attrib in
+                        ctx.options().parse_comments_for_attributes(comment)
+                    {
+                        attrs.append_all(attrib.to_tokenstream());
+                    }
+                    attrs
                 } else {
                     quote! {}
                 };
@@ -2546,8 +2567,20 @@ impl CodeGenerator for CompInfo {
         let mut needs_debug_impl = false;
         let mut needs_partialeq_impl = false;
         let needs_flexarray_impl = flex_array_generic.is_some();
-        if let Some(comment) = item.comment(ctx) {
-            attributes.push(attributes::doc(&comment));
+        let mut cfg_attrs = vec![];
+
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
+            attributes.push(attributes::doc(&processed_comment));
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
+                if matches!(
+                    attrib,
+                    CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
+                ) {
+                    cfg_attrs.push(attrib.to_tokenstream());
+                }
+                attributes.push(attrib.to_tokenstream());
+            }
         }
 
         // if a type has both a "packed" attribute and an "align(N)" attribute, then check if the
@@ -2918,6 +2951,7 @@ impl CodeGenerator for CompInfo {
 
         if needs_clone_impl {
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels Clone for #ty_for_impl {
                     fn clone(&self) -> Self { *self }
                 }
@@ -2948,6 +2982,7 @@ impl CodeGenerator for CompInfo {
             // non-zero padding bytes, especially when forwards/backwards compatibility is
             // involved.
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels Default for #ty_for_impl {
                     fn default() -> Self {
                         #body
@@ -2967,6 +3002,7 @@ impl CodeGenerator for CompInfo {
             let prefix = ctx.trait_prefix();
 
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels ::#prefix::fmt::Debug for #ty_for_impl {
                     #impl_
                 }
@@ -2991,6 +3027,7 @@ impl CodeGenerator for CompInfo {
 
                 let prefix = ctx.trait_prefix();
                 result.push(quote! {
+                    #( #cfg_attrs )*
                     impl #impl_generics_labels ::#prefix::cmp::PartialEq for #ty_for_impl #partialeq_bounds {
                         #impl_
                     }
@@ -3000,6 +3037,7 @@ impl CodeGenerator for CompInfo {
 
         if !methods.is_empty() {
             result.push(quote! {
+                #( #cfg_attrs )*
                 impl #impl_generics_labels #ty_for_impl {
                     #( #methods )*
                 }
@@ -3419,6 +3457,9 @@ struct EnumBuilder {
     enum_type: Ident,
     /// Attributes applying to the enum type
     attrs: Vec<proc_macro2::TokenStream>,
+    /// `cfg` attributes of the enum, which also need to be applied to the items emitted next to
+    /// the enum type.
+    cfg_attrs: Vec<proc_macro2::TokenStream>,
     /// The representation of the enum, e.g. `u32`.
     repr: syn::Type,
     /// The enum kind we are generating
@@ -3457,6 +3498,7 @@ impl EnumBuilder {
     fn new(
         name: &str,
         attrs: Vec<proc_macro2::TokenStream>,
+        cfg_attrs: Vec<proc_macro2::TokenStream>,
         repr: &syn::Type,
         enum_variation: EnumVariation,
         has_typedef: bool,
@@ -3498,6 +3540,7 @@ impl EnumBuilder {
         EnumBuilder {
             enum_type: enum_ty,
             attrs,
+            cfg_attrs,
             repr: repr.clone(),
             kind,
             enum_variants: vec![],
@@ -3588,9 +3631,11 @@ impl EnumBuilder {
     fn newtype_bitfield_impl(
         prefix: &Ident,
         rust_ty: &syn::Type,
+        cfg_attrs: &[proc_macro2::TokenStream],
     ) -> proc_macro2::TokenStream {
         let rust_ty_name = &rust_ty;
         quote! {
+            #( #cfg_attrs )*
             impl ::#prefix::ops::BitOr<#rust_ty> for #rust_ty {
                 type Output = Self;
 
@@ -3599,12 +3644,14 @@ impl EnumBuilder {
                     #rust_ty_name(self.0 | other.0)
                 }
             }
+            #( #cfg_attrs )*
             impl ::#prefix::ops::BitOrAssign for #rust_ty {
                 #[inline]
                 fn bitor_assign(&mut self, rhs: #rust_ty) {
                     self.0 |= rhs.0;
                 }
             }
+            #( #cfg_attrs )*
             impl ::#prefix::ops::BitAnd<#rust_ty> for #rust_ty {
                 type Output = Self;
 
@@ -3613,6 +3660,7 @@ impl EnumBuilder {
                     #rust_ty_name(self.0 & other.0)
                 }
             }
+            #( #cfg_attrs )*
             impl ::#prefix::ops::BitAndAssign for #rust_ty {
                 #[inline]
                 fn bitand_assign(&mut self, rhs: #rust_ty) {
@@ -3628,6 +3676,7 @@ impl EnumBuilder {
         rust_ty: &syn::Type,
     ) -> proc_macro2::TokenStream {
         let enum_ident = self.enum_type;
+        let cfg_attrs = self.cfg_attrs;
 
         // 1. Construct a list of the enum variants
         let variants = match self.kind {
@@ -3652,8 +3701,17 @@ impl EnumBuilder {
                 }
                 variants
             }
-            EnumBuilderKind::NewType { .. } => {
+            EnumBuilderKind::NewType {
+                is_anonymous,
+                is_global,
+                ..
+            } => {
                 let mut variants = vec![];
+
+                // Since we don't have an impl block in this case, we need to apply cfg attributes
+                // to each variant!
+                let variant_guard = (is_anonymous || is_global)
+                    .then(|| quote! { #( #cfg_attrs )* });
 
                 for v in self.enum_variants {
                     let variant_doc = &v.variant_doc;
@@ -3662,6 +3720,7 @@ impl EnumBuilder {
 
                     variants.push(quote! {
                         #variant_doc
+                        #variant_guard
                         pub const #variant_ident: #enum_ident = #variant_value;
                     });
                 }
@@ -3671,6 +3730,11 @@ impl EnumBuilder {
             EnumBuilderKind::ModuleConsts { .. } => {
                 let mut variants = vec![];
 
+                // Constants in a module are guarded by the attributes of the module.
+                let variant_guard =
+                    matches!(self.kind, EnumBuilderKind::Consts { .. })
+                        .then(|| quote! { #( #cfg_attrs )* });
+
                 for v in self.enum_variants {
                     let variant_doc = &v.variant_doc;
                     let variant_ident = &v.variant_name;
@@ -3678,6 +3742,7 @@ impl EnumBuilder {
 
                     variants.push(quote! {
                         #variant_doc
+                        #variant_guard
                         pub const #variant_ident: #enum_ident = #variant_value;
                     });
                 }
@@ -3718,6 +3783,7 @@ impl EnumBuilder {
                     }
                 } else {
                     quote! {
+                        #( #cfg_attrs )*
                         impl #enum_ident {
                             #( #variants )*
                         }
@@ -3725,8 +3791,9 @@ impl EnumBuilder {
                 };
 
                 let prefix = ctx.trait_prefix();
-                let bitfield_impl_opt = is_bitfield
-                    .then(|| Self::newtype_bitfield_impl(&prefix, rust_ty));
+                let bitfield_impl_opt = is_bitfield.then(|| {
+                    Self::newtype_bitfield_impl(&prefix, rust_ty, &cfg_attrs)
+                });
 
                 quote! {
                     // Previously variant impls where before the enum definition.
@@ -3755,7 +3822,7 @@ impl EnumBuilder {
             }
             EnumBuilderKind::ModuleConsts { module_name, .. } => {
                 quote! {
-                    // todo: Probably some attributes, e.g. `cfg` should apply to the `mod`.
+                    #( #cfg_attrs )*
                     pub mod #module_name {
                         #[allow(unused_imports)]
                         use super::*;
@@ -3861,8 +3928,19 @@ impl CodeGenerator for Enum {
 
         let mut attrs = vec![];
 
-        if let Some(comment) = item.comment(ctx) {
-            attrs.push(attributes::doc(&comment));
+        let mut cfg_attrs = vec![];
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
+            attrs.push(attributes::doc(&processed_comment));
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
+                if matches!(
+                    attrib,
+                    CodeGenAttributes::Cfg(_) | CodeGenAttributes::CfgAttr(_)
+                ) {
+                    cfg_attrs.push(attrib.to_tokenstream());
+                }
+                attrs.push(attrib.to_tokenstream());
+            }
         }
 
         if item.must_use(ctx) {
@@ -3958,9 +4036,11 @@ impl CodeGenerator for Enum {
             }
         });
 
+        // FIXME: The constants generated by `add_constant` are not guarded by `cfg_attrs`.
         let mut builder = EnumBuilder::new(
             &name,
             attrs,
+            cfg_attrs,
             &repr,
             variation,
             has_typedef,
@@ -4007,11 +4087,21 @@ impl CodeGenerator for Enum {
                 continue;
             }
 
-            let variant_doc = if let Some(comment) = variant.doc_comment(ctx) {
-                attributes::doc(&comment)
-            } else {
-                quote! {}
-            };
+            let mut variant_doc =
+                if let Some(comment) = variant.doc_comment(ctx) {
+                    attributes::doc(&comment)
+                } else {
+                    quote! {}
+                };
+            if ctx.options().generate_comments {
+                if let Some(raw_comment) = variant.raw_comment() {
+                    for attrib in
+                        ctx.options().parse_comments_for_attributes(raw_comment)
+                    {
+                        variant_doc.append_all(attrib.to_tokenstream());
+                    }
+                }
+            }
 
             match seen_values.entry(variant.val()) {
                 Entry::Occupied(ref entry) => {
@@ -4822,8 +4912,12 @@ impl CodeGenerator for Function {
             }
         }
 
-        if let Some(comment) = item.comment(ctx) {
-            attributes.push(attributes::doc(&comment));
+        if let Some(comment) = item.raw_comment(ctx) {
+            let processed_comment = ctx.options().process_comment(comment);
+            attributes.push(attributes::doc(&processed_comment));
+            for attrib in ctx.options().parse_comments_for_attributes(comment) {
+                attributes.push(attrib.to_tokenstream());
+            }
         }
 
         let abi = match signature.abi(ctx, Some(name)) {
